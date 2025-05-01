@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    progressBar,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -108,7 +108,7 @@ class ConfluenceSearchApp(QWidget):
         self.api_token.setEchoMode(QLineEdit.Password)
         self.batch_size = QSpinBox(); self.batch_size.setRange(10, 1000); self.batch_size.setValue(100)
         self.model_name = QLineEdit(MODEL_DEFAULT)
-        self.progress = ProgressBar(); self.progress.setValue(0)
+        self.progress = QProgressBar(); self.progress.setValue(0)
 
         btn_fetch = QPushButton("Fetch & Index")
         btn_fetch.clicked.connect(self.fetch_and_index)
