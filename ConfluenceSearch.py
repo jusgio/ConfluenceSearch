@@ -384,27 +384,26 @@ class ConfluenceSearch(QWidget):
         k = self.top_k.value()
         all_hits = []
         for d in self.loaded_indices:
-            dist, ids = d["index"].search(vec, k)
-            for idx, ds in zip(ids[0], dist[0]):
+            dist, ids = d["index"].search(vec, k)          # higher dist → better
+            for idx, sim in zip(ids[0], dist[0]):
                 if idx < 0:
                     continue
-                entry = d["map"][int(idx)]
-                pid, title = entry[0], entry[1]
-                url = entry[2] if len(entry) > 2 else None
-                all_hits.append((1 - ds, d["key"], pid, title, url))
+                pid, title, url = d["map"][int(idx)]
+                all_hits.append((sim, d["key"], pid, title, url))
 
+        # best similarity first
         all_hits.sort(key=lambda x: x[0], reverse=True)
         all_hits = all_hits[:k]
 
         self.results.clear()
-        for rank, (score, key, pid, title, url) in enumerate(all_hits, 1):
+        for rank, (sim, key, pid, title, url) in enumerate(all_hits, 1):
             if url:
                 self.results.append(
                     f'{rank}. [{key}:{pid}] <a href="{url}">{title}</a> '
-                    f'(sim={score:.3f})')
+                    f'(sim={sim:.3f})')
             else:
                 self.results.append(
-                    f'{rank}. [{key}:{pid}] {title} (sim={score:.3f})')
+                    f'{rank}. [{key}:{pid}] {title} (sim={sim:.3f})')
 
 # ────────────────────── entry point ───────────────────────────────
 if __name__ == "__main__":
