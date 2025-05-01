@@ -1,5 +1,0 @@
-sentence-transformers
-hnswlib
-requests
-beautifulsoup4
-pyqt5
