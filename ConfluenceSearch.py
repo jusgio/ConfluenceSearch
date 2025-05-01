@@ -24,7 +24,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
-CACHE_FILE = Path("confluence_spaces.json")   # ----------
+CACHE_FILE  = Path("confluence_spaces.json")
+INDEXES_DIR = Path("indexes")                     # <─── new constant
 
 
 # ───────────────────────── helpers ───────────────────────────────────────────
@@ -215,8 +216,10 @@ class ConfluenceSearch(QWidget):
 
     def load_index(self):
         self._clear_log()
-        idx_path, _ = QFileDialog.getOpenFileName(self, "FAISS index", "", "Index (*.index)")
-        map_path, _ = QFileDialog.getOpenFileName(self, "Page map", "", "Pickle (*.pkl)")
+        # Default to the indexes folder when it exists
+        default_dir = str(INDEXES_DIR) if INDEXES_DIR.exists() else ""
+        idx_path, _ = QFileDialog.getOpenFileName(self, "FAISS index", default_dir, "Index (*.index)")
+        map_path, _ = QFileDialog.getOpenFileName(self, "Page map",   default_dir, "Pickle (*.pkl)")
         if not idx_path or not map_path: return
         self.faiss_index = faiss.read_index(idx_path)
         self.id_to_page  = pickle.load(open(map_path, "rb"))
@@ -260,13 +263,21 @@ class ConfluenceSearch(QWidget):
         quantizer = faiss.IndexHNSWFlat(dim, 32)
         index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
         index.train(vecs); index.add(vecs); index.nprobe = self.nprobe.value()
-        faiss.write_index(index, "confluence_faiss.index")
-        pickle.dump({i: (pid, title) for i, (pid,title,_) in enumerate(pages)},
-                    open("id_to_page.pkl","wb"))
+
+        # ---- NEW: save inside indexes/ sub-folder ----
+        safe_key = "".join(ch if ch.isalnum() else "_" for ch in space_key)
+        INDEXES_DIR.mkdir(exist_ok=True)
+
+        idx_path = INDEXES_DIR / f"confluence_{safe_key}.index"
+        map_path = INDEXES_DIR / f"id_to_page_{safe_key}.pkl"
+
+        faiss.write_index(index, str(idx_path))
+        pickle.dump({i: (pid, title) for i, (pid, title, _) in enumerate(pages)},
+                    open(map_path, "wb"))
 
         self.faiss_index = index
         self.id_to_page  = {i: (pid, title) for i, (pid, title, _) in enumerate(pages)}
-        self._log("Index built and saved (confluence_faiss.index).")
+        self._log(f"Index built and saved ({idx_path}).")
         QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages.")
 
     # ───────────────── search ─────────────────
@@ -280,7 +291,7 @@ class ConfluenceSearch(QWidget):
         faiss.normalize_L2(vec)
         dist, ids = self.faiss_index.search(vec, self.top_k.value())
         self.results.clear()
-        for rank,(idx,d) in enumerate(zip(ids[0],dist[0]),1):
+        for rank, (idx, d) in enumerate(zip(ids[0], dist[0]), 1):
             pid, title = self.id_to_page[int(idx)]; score = 1 - d  # cosine sim
             self.results.append(f"{rank}. [{pid}] {title}  (sim={score:.3f})")
 
