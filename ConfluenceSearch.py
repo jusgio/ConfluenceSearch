@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 CACHE_FILE  = Path("confluence_spaces.json")
-INDEXES_DIR = Path("indexes")                     # <─── new constant
+INDEXES_DIR = Path("indexes")
 
 
 # ───────────────────────── helpers ───────────────────────────────────────────
@@ -94,11 +94,13 @@ class ConfluenceSearch(QWidget):
 
         # Space selector + compact button
         self.space_box = QComboBox()
-        btn_spaces = QPushButton("Load")          # small button
+        btn_spaces = QPushButton("Load")
         btn_spaces.setFixedWidth(100)
         btn_spaces.clicked.connect(self.load_spaces)
 
-        h_space = QHBoxLayout(); h_space.addWidget(self.space_box); h_space.addWidget(btn_spaces)
+        h_space = QHBoxLayout()
+        h_space.addWidget(self.space_box)
+        h_space.addWidget(btn_spaces)
 
         # personal-space toggle
         self.include_personal = QCheckBox("Include personal spaces (~)")
@@ -141,10 +143,21 @@ class ConfluenceSearch(QWidget):
         # ------------- Search tab --------------
         t_search, sv = QWidget(), QVBoxLayout()
         hl = QHBoxLayout()
-        self.query = QLineEdit(); self.top_k = QSpinBox(); self.top_k.setRange(1, 100); self.top_k.setValue(5)
-        btn_search = QPushButton("Search"); btn_search.clicked.connect(self.do_search)
-        hl.addWidget(QLabel("Query:")); hl.addWidget(self.query)
-        hl.addWidget(QLabel("Top-k:")); hl.addWidget(self.top_k); hl.addWidget(btn_search)
+
+        self.query = QLineEdit()
+        self.top_k = QSpinBox(); self.top_k.setRange(1, 100); self.top_k.setValue(5)
+        btn_search = QPushButton("Search")
+
+        # ← connect signals
+        btn_search.clicked.connect(self.do_search)
+        self.query.returnPressed.connect(self.do_search)
+
+        hl.addWidget(QLabel("Query:"))
+        hl.addWidget(self.query)
+        hl.addWidget(QLabel("Top-k:"))
+        hl.addWidget(self.top_k)
+        hl.addWidget(btn_search)
+
         self.results = QTextEdit(); self.results.setReadOnly(True)
         sv.addLayout(hl); sv.addWidget(self.results); t_search.setLayout(sv)
 
@@ -264,7 +277,7 @@ class ConfluenceSearch(QWidget):
         index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
         index.train(vecs); index.add(vecs); index.nprobe = self.nprobe.value()
 
-        # ---- NEW: save inside indexes/ sub-folder ----
+        # save inside indexes/ sub-folder
         safe_key = "".join(ch if ch.isalnum() else "_" for ch in space_key)
         INDEXES_DIR.mkdir(exist_ok=True)
 
@@ -292,7 +305,8 @@ class ConfluenceSearch(QWidget):
         dist, ids = self.faiss_index.search(vec, self.top_k.value())
         self.results.clear()
         for rank, (idx, d) in enumerate(zip(ids[0], dist[0]), 1):
-            pid, title = self.id_to_page[int(idx)]; score = 1 - d  # cosine sim
+            pid, title = self.id_to_page[int(idx)]
+            score = 1 - d  # cosine sim
             self.results.append(f"{rank}. [{pid}] {title}  (sim={score:.3f})")
 
 
