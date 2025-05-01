@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 """
 Confluence semantic-search GUI (FAISS backend)
-
-• Spaces combo is filled from a local JSON cache at startup.
-• 'Load Spaces' refreshes the list from Confluence and rewrites the cache.
-• Personal spaces (~username) are omitted unless you tick
-  'Include personal spaces (~)'.
-• Log pane is cleared whenever an action button is pressed.
 """
 
 import json, os, sys, pickle, requests
@@ -20,16 +14,14 @@ import faiss
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QTextEdit,
     QComboBox, QSpinBox, QVBoxLayout, QHBoxLayout, QTabWidget, QFileDialog,
-    QMessageBox, QProgressBar, QFormLayout, QCheckBox
+    QMessageBox, QProgressBar, QFormLayout, QCheckBox, QTextBrowser
 )
 from PyQt5.QtCore import Qt
 
-CACHE_FILE = Path("confluence_spaces.json")   # ----------
+CACHE_FILE = Path("confluence_spaces.json")
 
 
-# ───────────────────────── helpers ───────────────────────────────────────────
 def fetch_spaces(base_url: str, auth) -> list:
-    """Return list[dict(key,name)] for all spaces."""
     out, start, limit = [], 0, 50
     url = f"{base_url.rstrip('/')}/rest/api/space"
     while True:
@@ -44,7 +36,6 @@ def fetch_spaces(base_url: str, auth) -> list:
 
 
 def fetch_pages(base_url: str, space_key: str, auth) -> list:
-    """Return list[(page_id, title, url, body_text)]."""
     pages, start, limit = [], 0, 50
     url = f"{base_url.rstrip('/')}/rest/api/content"
     while True:
@@ -65,28 +56,23 @@ def fetch_pages(base_url: str, space_key: str, auth) -> list:
     return pages
 
 
-# ────────────────────────── main GUI class ───────────────────────────────────
 class ConfluenceSearch(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Confluence Semantic Search (FAISS)")
         self.resize(1180, 650)
 
-        # runtime
         self.faiss_index = None
         self.id_to_page, self.model = {}, None
 
         self._build_ui()
-        self._load_spaces_cache()          # ← initial fill
+        self._load_spaces_cache()
 
-    # ───────────────── UI layout ─────────────────
     def _build_ui(self):
-        root = QHBoxLayout(self)           # split: tabs | log
+        root = QHBoxLayout(self)
         tabs = QTabWidget()
 
-        # ------------- Indexing tab -------------
         t_idx, form = QWidget(), QFormLayout()
-
         self.base_url = QLineEdit("https://innovmetric.atlassian.net/wiki")
         self.username = QLineEdit(f"{os.getenv('USERNAME')}@innovmetric.com")
         self.api_token = QLineEdit(os.getenv("CONFLUENCE_TOKEN") or "")
@@ -96,47 +82,44 @@ class ConfluenceSearch(QWidget):
         btn_spaces = QPushButton("Load")
         btn_spaces.setFixedWidth(100)
         btn_spaces.clicked.connect(self.load_spaces)
-
-        h_space = QHBoxLayout()
-        h_space.addWidget(self.space_box)
-        h_space.addWidget(btn_spaces)
+        h_space = QHBoxLayout(); h_space.addWidget(self.space_box); h_space.addWidget(btn_spaces)
 
         self.include_personal = QCheckBox("Include personal spaces (~)")
         self.include_personal.setChecked(False)
 
         self.model_box = QComboBox()
-        self.model_box.addItems(["all-MiniLM-L6-v2", "all-mpnet-base-v2", "paraphrase-albert-small-v2"])
-
-        self.only_title  = QCheckBox("Just title")
+        self.model_box.addItems([
+            "all-MiniLM-L6-v2", "all-mpnet-base-v2", "paraphrase-albert-small-v2"
+        ])
+        self.only_title = QCheckBox("Just title")
         self.only_title.setChecked(True)
         self.titles_only = QCheckBox("List titles only (skip embed/index)")
         self.titles_only.setChecked(True)
 
-        self.nlist  = QSpinBox(); self.nlist.setRange(1, 4096); self.nlist.setValue(1)
-        self.nprobe = QSpinBox(); self.nprobe.setRange(1, 64);  self.nprobe.setValue(1)
+        self.nlist = QSpinBox(); self.nlist.setRange(1, 4096); self.nlist.setValue(1)
+        self.nprobe = QSpinBox(); self.nprobe.setRange(1, 64); self.nprobe.setValue(1)
 
-        btn_load  = QPushButton("Load Existing Index")
+        btn_load = QPushButton("Load Existing Index")
         btn_build = QPushButton("Fetch & Index")
         btn_load.clicked.connect(self.load_index)
         btn_build.clicked.connect(self.fetch_and_index)
 
         self.prog = QProgressBar(); self.prog.setValue(0)
 
-        form.addRow("Base URL:",        self.base_url)
-        form.addRow("Username:",        self.username)
-        form.addRow("API token:",       self.api_token)
-        form.addRow(QLabel("Space:"),   h_space)
+        form.addRow("Base URL:", self.base_url)
+        form.addRow("Username:", self.username)
+        form.addRow("API token:", self.api_token)
+        form.addRow(QLabel("Space:"), h_space)
         form.addRow(self.include_personal)
         form.addRow("Embedding model:", self.model_box)
         form.addRow(self.only_title)
         form.addRow(self.titles_only)
-        form.addRow("FAISS nlist:",  self.nlist)
+        form.addRow("FAISS nlist:", self.nlist)
         form.addRow("FAISS nprobe:", self.nprobe)
         form.addRow(btn_load, btn_build)
         form.addRow("Progress:", self.prog)
         t_idx.setLayout(form)
 
-        # ------------- Search tab --------------
         t_search, sv = QWidget(), QVBoxLayout()
         hl = QHBoxLayout()
         self.query = QLineEdit()
@@ -144,10 +127,12 @@ class ConfluenceSearch(QWidget):
         btn_search = QPushButton("Search"); btn_search.clicked.connect(self.do_search)
         hl.addWidget(QLabel("Query:")); hl.addWidget(self.query)
         hl.addWidget(QLabel("Top-k:")); hl.addWidget(self.top_k); hl.addWidget(btn_search)
-        self.results = QTextEdit(); self.results.setReadOnly(True)
+        self.results = QTextBrowser(); self.results.setReadOnly(True)
+        self.results.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.results.setOpenExternalLinks(True)
         sv.addLayout(hl); sv.addWidget(self.results); t_search.setLayout(sv)
 
-        tabs.addTab(t_idx,    "Index / Fetch")
+        tabs.addTab(t_idx, "Index / Fetch")
         tabs.addTab(t_search, "Search")
 
         log_box = QVBoxLayout()
@@ -215,7 +200,7 @@ class ConfluenceSearch(QWidget):
         map_path, _ = QFileDialog.getOpenFileName(self, "Page map", "", "Pickle (*.pkl)")
         if not idx_path or not map_path: return
         self.faiss_index = faiss.read_index(idx_path)
-        self.id_to_page  = pickle.load(open(map_path, "rb"))
+        self.id_to_page = pickle.load(open(map_path, "rb"))
         self._log(f"Loaded index with {len(self.id_to_page)} vectors.")
 
     def fetch_and_index(self):
@@ -244,26 +229,21 @@ class ConfluenceSearch(QWidget):
 
         vecs = []
         for i in range(0, len(texts), 128):
-            self.prog.setValue(int(i / len(texts) * 100))
-            QApplication.processEvents()
-            vecs.extend(model.encode(texts[i:i + 128], convert_to_numpy=True))
+            self.prog.setValue(int(i/len(texts)*100)); QApplication.processEvents()
+            vecs.extend(model.encode(texts[i:i+128], convert_to_numpy=True))
         self.prog.setValue(100)
-        vecs = np.asarray(vecs, dtype="float32")
-        faiss.normalize_L2(vecs)
+        vecs = np.asarray(vecs, dtype="float32"); faiss.normalize_L2(vecs)
 
         self._log("Building FAISS index …")
         quantizer = faiss.IndexHNSWFlat(dim, 32)
         index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
-        index.train(vecs)
-        index.add(vecs)
-        index.nprobe = self.nprobe.value()
+        index.train(vecs); index.add(vecs); index.nprobe = self.nprobe.value()
         faiss.write_index(index, "confluence_faiss.index")
-
-        page_map = {i: (pid, title, url) for i, (pid, title, url, _) in enumerate(pages)}
-        pickle.dump(page_map, open("id_to_page.pkl", "wb"))
+        pickle.dump({i: (pid, title, url) for i, (pid, title, url, _) in enumerate(pages)},
+                    open("id_to_page.pkl", "wb"))
 
         self.faiss_index = index
-        self.id_to_page = page_map
+        self.id_to_page = {i: (pid, title, url) for i, (pid, title, url, _) in enumerate(pages)}
         self._log("Index built and saved (confluence_faiss.index).")
         QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages.")
 
@@ -277,13 +257,19 @@ class ConfluenceSearch(QWidget):
         faiss.normalize_L2(vec)
         dist, ids = self.faiss_index.search(vec, self.top_k.value())
         self.results.clear()
+        self.results.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.results.setOpenExternalLinks(True)
+
+        html = ""
         for rank, (idx, d) in enumerate(zip(ids[0], dist[0]), 1):
-            pid, title, url = self.id_to_page[int(idx)]
+            if idx == -1 or idx not in self.id_to_page:
+                continue
+            pid, title, url = self.id_to_page[idx]
             score = 1 - d
-            self.results.append(f"{rank}. [{pid}] {title}  (sim={score:.3f})\n{url}\n")
+            html += f"{rank}. [{pid}] <a href=\"{url}\">{title}</a> (sim={score:.3f})<br><br>\n"
+        self.results.setHtml(html or "No results found.")
 
 
-# ──────────── entry point ────────────
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = ConfluenceSearch(); win.show()
