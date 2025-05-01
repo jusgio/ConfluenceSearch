@@ -24,7 +24,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
-CACHE_FILE = Path("confluence_spaces.json")   # ----------
+CACHE_FILE  = Path("confluence_spaces.json")
+INDEXES_DIR = Path("indexes")                     # <─── new constant
 
 
 # ───────────────────────── helpers ───────────────────────────────────────────
@@ -215,8 +216,10 @@ class ConfluenceSearch(QWidget):
 
     def load_index(self):
         self._clear_log()
-        idx_path, _ = QFileDialog.getOpenFileName(self, "FAISS index", "", "Index (*.index)")
-        map_path, _ = QFileDialog.getOpenFileName(self, "Page map", "", "Pickle (*.pkl)")
+        # Default to the indexes folder when it exists
+        default_dir = str(INDEXES_DIR) if INDEXES_DIR.exists() else ""
+        idx_path, _ = QFileDialog.getOpenFileName(self, "FAISS index", default_dir, "Index (*.index)")
+        map_path, _ = QFileDialog.getOpenFileName(self, "Page map",   default_dir, "Pickle (*.pkl)")
         if not idx_path or not map_path: return
         self.faiss_index = faiss.read_index(idx_path)
         self.id_to_page  = pickle.load(open(map_path, "rb"))
@@ -261,18 +264,20 @@ class ConfluenceSearch(QWidget):
         index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
         index.train(vecs); index.add(vecs); index.nprobe = self.nprobe.value()
 
-        # ---- NEW: unique filenames per space ----
+        # ---- NEW: save inside indexes/ sub-folder ----
         safe_key = "".join(ch if ch.isalnum() else "_" for ch in space_key)
-        idx_fname = f"confluence_{safe_key}.index"
-        map_fname = f"id_to_page_{safe_key}.pkl"
+        INDEXES_DIR.mkdir(exist_ok=True)
 
-        faiss.write_index(index, idx_fname)
+        idx_path = INDEXES_DIR / f"confluence_{safe_key}.index"
+        map_path = INDEXES_DIR / f"id_to_page_{safe_key}.pkl"
+
+        faiss.write_index(index, str(idx_path))
         pickle.dump({i: (pid, title) for i, (pid, title, _) in enumerate(pages)},
-                    open(map_fname, "wb"))
+                    open(map_path, "wb"))
 
         self.faiss_index = index
         self.id_to_page  = {i: (pid, title) for i, (pid, title, _) in enumerate(pages)}
-        self._log(f"Index built and saved ({idx_fname}).")
+        self._log(f"Index built and saved ({idx_path}).")
         QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages.")
 
     # ───────────────── search ─────────────────
