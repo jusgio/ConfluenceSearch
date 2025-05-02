@@ -2,20 +2,16 @@
 """
 Confluence semantic‑search GUI (FAISS backend)
 
-• Spaces combo is filled from a local JSON cache at startup.
-• “Load Spaces” refreshes the list from Confluence and rewrites the cache.
-• Personal spaces (~username) are omitted unless you tick
-  “Include personal spaces (~)”.
-• **Only “current/live” spaces that actually contain at least one page** are
-  shown; spaces whose Confluence status is *archived* or *trashed* (deleted)
-  are ignored automatically.
-• You can create a FAISS index for any Confluence space; each index is stored
-  under ./indexes/ as a .index / .pkl pair whose filenames now contain both
-  the space *key* and *name* for easy identification.
-• The Search tab lets you load multiple indexes at once (all, or selected),
-  perform a semantic query across them, and shows the results ranked globally.
-• When pages are fetched we also capture each page’s URL; the search‑results
-  list displays the title as a clickable link that opens in the default browser.
+Changes in this revision
+─────────────────────────
+• The single‑selection *combo box* for choosing a space has been replaced with a
+  *multi‑selection list* (QListWidget).
+• “Fetch & Index” now gathers pages from **all** selected spaces and builds one
+  combined FAISS index containing every page of every selected space.
+• File‑name logic copes with multiple spaces by concatenating their keys with
+  “+”.  E.g. 3 spaces ABC, DEF, XYZ ⇒ index file
+  `confluence_ABC+DEF+XYZ__3spaces.index`.
+• All other behaviour is unchanged.
 """
 
 import json
@@ -199,13 +195,14 @@ class ConfluenceSearch(QWidget):
         self.api_token = QLineEdit(os.getenv("CONFLUENCE_TOKEN") or "")
         self.api_token.setEchoMode(QLineEdit.Password)
 
-        # space selector
-        self.space_box = QComboBox()
-        btn_spaces = QPushButton("Load")
-        btn_spaces.setFixedWidth(100)
+        # spaces selector ‑‑ **now multi‑select list**
+        self.space_list = QListWidget()
+        self.space_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        btn_spaces = QPushButton("Load Spaces")
+        btn_spaces.setFixedWidth(120)
         btn_spaces.clicked.connect(self.load_spaces)
         h_space = QHBoxLayout()
-        h_space.addWidget(self.space_box)
+        h_space.addWidget(self.space_list, stretch=1)
         h_space.addWidget(btn_spaces)
 
         self.include_personal = QCheckBox("Include personal spaces (~)")
@@ -241,7 +238,7 @@ class ConfluenceSearch(QWidget):
         form.addRow("Base URL:", self.base_url)
         form.addRow("Username:", self.username)
         form.addRow("API token:", self.api_token)
-        form.addRow(QLabel("Space:"), h_space)
+        form.addRow(QLabel("Spaces:"), h_space)
         form.addRow(self.include_personal)
         form.addRow("Embedding model:", self.model_box)
         form.addRow(self.only_title)
@@ -328,7 +325,7 @@ class ConfluenceSearch(QWidget):
         if CACHE_FILE.exists():
             try:
                 spaces = json.loads(CACHE_FILE.read_text())
-                self._fill_space_combo(spaces)
+                self._fill_space_list(spaces)
                 self._log(f"Loaded {len(spaces)} cached spaces.")
             except Exception as e:
                 self._log(f"Cache read error: {e}")
@@ -340,16 +337,18 @@ class ConfluenceSearch(QWidget):
         except Exception as e:
             self._log(f"Cache write error: {e}")
 
-    def _fill_space_combo(self, spaces):
-        """Populate the combo box with the *names* of the spaces only."""
+    def _fill_space_list(self, spaces):
+        """Populate the multi‑select list with the space *names* only."""
         include_pers = self.include_personal.isChecked()
-        self.space_box.clear()
+        self.space_list.clear()
         for s in spaces:
             if not include_pers and s["key"].startswith("~"):
                 continue
-            self.space_box.addItem(s["name"], userData=s["key"])
-        if self.space_box.count() == 0:
-            self.space_box.addItem("— no spaces —")
+            item = QListWidgetItem(s["name"])
+            item.setData(Qt.UserRole, s["key"])
+            self.space_list.addItem(item)
+        if self.space_list.count() == 0:
+            self.space_list.addItem("— no spaces —")
 
     # ────────────────────── UI actions ───────────────────────────────
     def load_spaces(self):
@@ -371,9 +370,9 @@ class ConfluenceSearch(QWidget):
             else:
                 self._log(f"Skipping empty space: {s['name']} ({s['key']})")
 
-        self._fill_space_combo(filtered_spaces)
+        self._fill_space_list(filtered_spaces)
         self._write_spaces_cache(filtered_spaces)
-        QMessageBox.information(self, "Spaces", f"{self.space_box.count()} spaces loaded.")
+        QMessageBox.information(self, "Spaces", f"{self.space_list.count()} spaces loaded.")
 
     # ────────── index‑loading helpers ──────────
     def _refresh_available_indexes(self):
@@ -432,19 +431,32 @@ class ConfluenceSearch(QWidget):
     def fetch_and_index(self):
         self._clear_log()
         self.prog.setValue(0)
-        auth = HTTPBasicAuth(self.username.text(), self.api_token.text())
-        space_key = self.space_box.currentData() or ""
-        space_name = self.space_box.currentText().strip()
-        self._log(f"Fetching pages from space {space_name} ({space_key}) …")
 
-        try:
-            pages = fetch_pages(self.base_url.text(), space_key, auth)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Fetch failed:\n{e}")
-            self._log(f"ERROR: {e}")
+        # collect selected spaces
+        sel_items = [item for item in self.space_list.selectedItems() if item.data(Qt.UserRole)]
+        if not sel_items:
+            QMessageBox.warning(self, "No space selected", "Select at least one space to index.")
+            return
+        space_keys = [it.data(Qt.UserRole) for it in sel_items]
+        space_names = [it.text().strip() for it in sel_items]
+
+        self._log(f"Fetching pages from {len(space_keys)} space(s): {', '.join(space_names)} …")
+        auth = HTTPBasicAuth(self.username.text(), self.api_token.text())
+
+        pages = []
+        for skey, sname in zip(space_keys, space_names):
+            try:
+                sp_pages = fetch_pages(self.base_url.text(), skey, auth)
+                self._log(f"  • {sname}: {len(sp_pages)} pages")
+                pages.extend(sp_pages)
+            except Exception as e:
+                self._log(f"ERROR fetching {sname} ({skey}): {e}")
+
+        if not pages:
+            QMessageBox.warning(self, "No content", "No pages were fetched from the selected spaces.")
             return
 
-        self._log(f"{len(pages)} pages fetched.")
+        self._log(f"TOTAL pages fetched: {len(pages)}.")
 
         # titles‑only diagnostic
         if self.titles_only.isChecked():
@@ -473,7 +485,11 @@ class ConfluenceSearch(QWidget):
         index.add(vecs)
         index.nprobe = self.nprobe.value()
 
-        rest = _index_rest(space_key, space_name)
+        # create combined filename parts
+        combined_key = "+".join(space_keys)
+        combined_name = f"{len(space_keys)}spaces"
+        rest = _index_rest(combined_key, combined_name)
+
         INDEXES_DIR.mkdir(exist_ok=True)
         idx_path = INDEXES_DIR / f"{IDX_PREFIX}{rest}.index"
         map_path = INDEXES_DIR / f"{MAP_PREFIX}{rest}.pkl"
@@ -485,7 +501,7 @@ class ConfluenceSearch(QWidget):
         )
 
         self._log(f"Index built and saved ({idx_path.name}).")
-        QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages.")
+        QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages across {len(space_keys)} spaces.")
         self._refresh_available_indexes()
 
     # ─────────────────────── search ────────────────────────────────
