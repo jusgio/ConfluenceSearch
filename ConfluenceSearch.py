@@ -153,9 +153,10 @@ class ConfluenceSearch(QWidget):
         )
 
         self.only_title = QCheckBox("Just title")
-        self.only_title.setChecked(True)
+        self.only_title.setChecked(False)  # default: unchecked
+
         self.titles_only = QCheckBox("List titles only (skip embed/index)")
-        self.titles_only.setChecked(True)
+        self.titles_only.setChecked(False)  # default: unchecked
 
         self.nlist = QSpinBox()
         self.nlist.setRange(1, 4096)
