@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Confluence semantic-search GUI (FAISS backend)
+Confluence semantic‑search GUI (FAISS backend)
 
 • Spaces combo is filled from a local JSON cache at startup.
 • “Load Spaces” refreshes the list from Confluence and rewrites the cache.
 • Personal spaces (~username) are omitted unless you tick
   “Include personal spaces (~)”.
 • You can create a FAISS index for any Confluence space; each index is stored
-  under ./indexes/ as a .index / .pkl pair.
+  under ./indexes/ as a .index / .pkl pair whose filenames now contain both
+  the space *key* and *name* for easy identification.
 • The Search tab lets you load multiple indexes at once (all, or selected),
   perform a semantic query across them, and shows the results ranked globally.
-• When pages are fetched we now also capture each page’s URL.  The search
-  results list displays the page title as a clickable link that opens in your
-  default browser.
+• When pages are fetched we also capture each page’s URL; the search‐results
+  list displays the title as a clickable link that opens in the default browser.
 """
 
 import json
@@ -47,13 +47,17 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QCheckBox,
     QListWidget,
+    QListWidgetItem,
     QAbstractItemView,
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QVariant
 
 # ───────────────────────────── constants ──────────────────────────────
 CACHE_FILE = Path("confluence_spaces.json")
 INDEXES_DIR = Path("indexes")
+IDX_PREFIX = "confluence_"
+MAP_PREFIX = "id_to_page_"
+SEPARATOR = "__"  # separates key and (sanitised) name in filenames
 
 
 # ───────────────────────────── helpers ────────────────────────────────
@@ -103,6 +107,37 @@ def fetch_pages(base_url: str, space_key: str, auth) -> list:
     return pages
 
 
+def _safe(s: str) -> str:
+    """Return a filesystem‑safe version of *s* (letters+digits, else '_')."""
+    return "".join(c if c.isalnum() else "_" for c in s)
+
+
+def _index_rest(key: str, name: str) -> str:
+    """The part of the filename after the prefix (sans extension)."""
+    return f"{key}{SEPARATOR}{_safe(name)}"
+
+
+def _parse_index_filename(path: Path) -> tuple[str, str]:
+    """
+    Extract (key, display_name) from an index or map filename.
+    Falls back gracefully if pattern is unknown / legacy.
+    """
+    stem = path.stem
+    if stem.startswith(IDX_PREFIX):
+        rest = stem[len(IDX_PREFIX) :]
+    elif stem.startswith(MAP_PREFIX):
+        rest = stem[len(MAP_PREFIX) :]
+    else:
+        rest = stem
+    if SEPARATOR in rest:
+        key, safe_name = rest.split(SEPARATOR, 1)
+        disp_name = safe_name.replace("_", " ").strip()
+    else:  # legacy filename containing only the key
+        key = rest
+        disp_name = key
+    return key, disp_name
+
+
 # ──────────────────────── main GUI class ──────────────────────────────
 class ConfluenceSearch(QWidget):
     def __init__(self):
@@ -112,8 +147,9 @@ class ConfluenceSearch(QWidget):
 
         # runtime
         self.model = None
-        # each element: {"key": safe_key, "index": faiss_index, "map": id_to_page}
-        self.loaded_indices = []
+        # each element: {"key": <space_key>, "name": <space_name>,
+        #                "index": faiss_index, "map": id_to_page}
+        self.loaded_indices: list[dict] = []
 
         self._build_ui()
         self._load_spaces_cache()
@@ -153,10 +189,10 @@ class ConfluenceSearch(QWidget):
         )
 
         self.only_title = QCheckBox("Just title")
-        self.only_title.setChecked(False)  # default: unchecked
+        self.only_title.setChecked(False)
 
         self.titles_only = QCheckBox("List titles only (skip embed/index)")
-        self.titles_only.setChecked(False)  # default: unchecked
+        self.titles_only.setChecked(False)
 
         self.nlist = QSpinBox()
         self.nlist.setRange(1, 4096)
@@ -216,7 +252,7 @@ class ConfluenceSearch(QWidget):
         btn_search.clicked.connect(self.do_search)
         q_line.addWidget(QLabel("Query:"))
         q_line.addWidget(self.query, stretch=1)
-        q_line.addWidget(QLabel("Top-k:"))
+        q_line.addWidget(QLabel("Top‑k:"))
         q_line.addWidget(self.top_k)
         q_line.addWidget(btn_search)
         sv.addLayout(q_line)
@@ -280,7 +316,6 @@ class ConfluenceSearch(QWidget):
         for s in spaces:
             if not include_pers and s["key"].startswith("~"):
                 continue
-            # Display the human‑readable name, but keep the key as userData.
             self.space_box.addItem(s["name"], userData=s["key"])
         if self.space_box.count() == 0:
             self.space_box.addItem("— no spaces —")
@@ -299,44 +334,57 @@ class ConfluenceSearch(QWidget):
         self._write_spaces_cache(spaces)
         QMessageBox.information(self, "Spaces", f"{self.space_box.count()} spaces loaded.")
 
-    # ────────── index-loading helpers ──────────
+    # ────────── index‑loading helpers ──────────
     def _refresh_available_indexes(self):
         self.available_list.clear()
         if not INDEXES_DIR.exists():
             return
         loaded_keys = {d["key"] for d in self.loaded_indices}
-        for idx_file in INDEXES_DIR.glob("confluence_*.index"):
-            key = idx_file.stem[len("confluence_") :]
+        for idx_file in INDEXES_DIR.glob(f"{IDX_PREFIX}*.index"):
+            key, disp_name = _parse_index_filename(idx_file)
+            # Require matching map file
+            map_file = INDEXES_DIR / f"{MAP_PREFIX}{idx_file.stem[len(IDX_PREFIX):]}.pkl"
+            if not map_file.exists():
+                continue
             if key in loaded_keys:
                 continue
-            if not (INDEXES_DIR / f"id_to_page_{key}.pkl").exists():
-                continue
-            self.available_list.addItem(key)
+            item = QListWidgetItem(disp_name)
+            item.setData(Qt.UserRole, idx_file)  # store full path for later
+            self.available_list.addItem(item)
 
-    def _load_index_pair(self, key: str):
-        idx_file = INDEXES_DIR / f"confluence_{key}.index"
-        map_file = INDEXES_DIR / f"id_to_page_{key}.pkl"
-        index = faiss.read_index(str(idx_file))
-        id_map = pickle.load(open(map_file, "rb"))
-        self.loaded_indices.append({"key": key, "index": index, "map": id_map})
-        self._log(f"Loaded index '{key}' ({len(id_map)} vectors).")
+    def _load_index_pair(self, idx_file: Path):
+        key, disp_name = _parse_index_filename(idx_file)
+        rest = idx_file.stem[len(IDX_PREFIX) :]
+        map_file = INDEXES_DIR / f"{MAP_PREFIX}{rest}.pkl"
+        try:
+            index = faiss.read_index(str(idx_file))
+            id_map = pickle.load(open(map_file, "rb"))
+        except Exception as e:
+            self._log(f"ERROR loading {idx_file.name}: {e}")
+            return
+        self.loaded_indices.append({"key": key, "name": disp_name, "index": index, "map": id_map})
+        self._log(f"Loaded index '{disp_name}' ({len(id_map)} vectors).")
 
     def load_selected_indexes(self):
-        keys = [item.text() for item in self.available_list.selectedItems()]
-        if not keys:
+        idx_paths = [
+            self.available_list.item(i).data(Qt.UserRole)
+            for i in range(self.available_list.count())
+            if self.available_list.item(i).isSelected()
+        ]
+        if not idx_paths:
             QMessageBox.information(self, "Load Selected", "No indexes selected.")
             return
-        for key in keys:
-            self._load_index_pair(key)
+        for idx_path in idx_paths:
+            self._load_index_pair(idx_path)
         self._refresh_available_indexes()
 
     def load_all_available_indexes(self):
-        keys = [self.available_list.item(i).text() for i in range(self.available_list.count())]
-        if not keys:
+        idx_paths = [self.available_list.item(i).data(Qt.UserRole) for i in range(self.available_list.count())]
+        if not idx_paths:
             QMessageBox.information(self, "Load All", "No available indexes.")
             return
-        for key in keys:
-            self._load_index_pair(key)
+        for idx_path in idx_paths:
+            self._load_index_pair(idx_path)
         self._refresh_available_indexes()
 
     # ────────────────────── fetch & index ────────────────────────────
@@ -344,9 +392,9 @@ class ConfluenceSearch(QWidget):
         self._clear_log()
         self.prog.setValue(0)
         auth = HTTPBasicAuth(self.username.text(), self.api_token.text())
-        # The key is stored in userData, so prefer currentData().
-        space_key = self.space_box.currentData() or self.space_box.currentText()
-        self._log(f"Fetching pages from space {space_key} …")
+        space_key = self.space_box.currentData() or ""
+        space_name = self.space_box.currentText().strip()
+        self._log(f"Fetching pages from space {space_name} ({space_key}) …")
 
         try:
             pages = fetch_pages(self.base_url.text(), space_key, auth)
@@ -357,7 +405,7 @@ class ConfluenceSearch(QWidget):
 
         self._log(f"{len(pages)} pages fetched.")
 
-        # titles-only diagnostic
+        # titles‑only diagnostic
         if self.titles_only.isChecked():
             for pid, title, *_ in pages:
                 self._log(f"[{pid}] {title}")
@@ -384,10 +432,10 @@ class ConfluenceSearch(QWidget):
         index.add(vecs)
         index.nprobe = self.nprobe.value()
 
-        safe_key = "".join(ch if ch.isalnum() else "_" for ch in space_key)
+        rest = _index_rest(space_key, space_name)
         INDEXES_DIR.mkdir(exist_ok=True)
-        idx_path = INDEXES_DIR / f"confluence_{safe_key}.index"
-        map_path = INDEXES_DIR / f"id_to_page_{safe_key}.pkl"
+        idx_path = INDEXES_DIR / f"{IDX_PREFIX}{rest}.index"
+        map_path = INDEXES_DIR / f"{MAP_PREFIX}{rest}.pkl"
 
         faiss.write_index(index, str(idx_path))
         pickle.dump(
@@ -395,7 +443,7 @@ class ConfluenceSearch(QWidget):
             open(map_path, "wb"),
         )
 
-        self._log(f"Index built and saved ({idx_path}).")
+        self._log(f"Index built and saved ({idx_path.name}).")
         QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages.")
         self._refresh_available_indexes()
 
@@ -421,18 +469,16 @@ class ConfluenceSearch(QWidget):
                 if idx < 0:
                     continue
                 pid, title, url = d["map"][int(idx)]
-                all_hits.append((sim, d["key"], pid, title, url))
+                all_hits.append((sim, d["name"], pid, title, url))
 
-        # best similarity first
         all_hits.sort(key=lambda x: x[0], reverse=True)
         all_hits = all_hits[:k]
 
         self.results.clear()
-        for rank, (sim, key, pid, title, url) in enumerate(all_hits, 1):
-            if url:
-                self.results.append(f'{rank}. [{key}:{pid}] <a href="{url}">{title}</a> ' f"(sim={sim:.3f})")
-            else:
-                self.results.append(f"{rank}. [{key}:{pid}] {title} (sim={sim:.3f})")
+        for rank, (sim, space_name, pid, title, url) in enumerate(all_hits, 1):
+            tag = f"[{space_name}:{pid}]"
+            link = f'<a href="{url}">{title}</a>' if url else title
+            self.results.append(f"{rank}. {tag} {link} (sim={sim:.3f})")
 
 
 # ────────────────────── entry point ───────────────────────────────
