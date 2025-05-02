@@ -6,12 +6,15 @@ Confluence semantic‑search GUI (FAISS backend)
 • “Load Spaces” refreshes the list from Confluence and rewrites the cache.
 • Personal spaces (~username) are omitted unless you tick
   “Include personal spaces (~)”.
+• **Only “current/live” spaces that actually contain at least one page** are
+  shown; spaces whose Confluence status is *archived* or *trashed* (deleted)
+  are ignored automatically.
 • You can create a FAISS index for any Confluence space; each index is stored
   under ./indexes/ as a .index / .pkl pair whose filenames now contain both
   the space *key* and *name* for easy identification.
 • The Search tab lets you load multiple indexes at once (all, or selected),
   perform a semantic query across them, and shows the results ranked globally.
-• When pages are fetched we also capture each page’s URL; the search‐results
+• When pages are fetched we also capture each page’s URL; the search‑results
   list displays the title as a clickable link that opens in the default browser.
 """
 
@@ -19,9 +22,9 @@ import json
 import os
 import sys
 import pickle
-import requests
 from pathlib import Path
 
+import requests
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
 import numpy as np
@@ -41,7 +44,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QTabWidget,
-    QFileDialog,
     QMessageBox,
     QProgressBar,
     QFormLayout,
@@ -50,7 +52,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QAbstractItemView,
 )
-from PyQt5.QtCore import Qt, QVariant
+from PyQt5.QtCore import Qt
 
 # ───────────────────────────── constants ──────────────────────────────
 CACHE_FILE = Path("confluence_spaces.json")
@@ -61,22 +63,52 @@ SEPARATOR = "__"  # separates key and (sanitised) name in filenames
 
 
 # ───────────────────────────── helpers ────────────────────────────────
-def fetch_spaces(base_url: str, auth) -> list:
-    """Return list[{key,name}] for all spaces visible to the user."""
+def fetch_spaces(base_url: str, auth) -> list[dict]:
+    """
+    Return list[{key,name,status}] for all *current* spaces visible to the user.
+
+    For Confluence Cloud we **must NOT** pass `status=all` (Cloud returns 400).
+    The default behaviour already lists only “current” (a.k.a. live) spaces,
+    so archived / trashed spaces never reach the caller.
+    """
     out, start, limit = [], 0, 50
     url = f"{base_url.rstrip('/')}/rest/api/space"
     while True:
-        r = requests.get(url, params={"limit": limit, "start": start}, auth=auth, timeout=30)
+        params = {"limit": limit, "start": start}
+        r = requests.get(url, params=params, auth=auth, timeout=30)
         r.raise_for_status()
         data = r.json()
-        out.extend({"key": s["key"], "name": s["name"]} for s in data.get("results", []))
+        out.extend(
+            {
+                "key": s["key"],
+                "name": s["name"],
+                "status": s.get("status", "current"),
+            }
+            for s in data.get("results", [])
+        )
         if not data.get("_links", {}).get("next"):
             break
         start += limit
     return out
 
 
-def fetch_pages(base_url: str, space_key: str, auth) -> list:
+def space_has_pages(base_url: str, space_key: str, auth) -> bool:
+    """
+    Quick check to see whether the given space contains at least one page.
+    Uses limit=1 so the payload is minimal.
+    """
+    url = f"{base_url.rstrip('/')}/rest/api/content"
+    params = {"spaceKey": space_key, "limit": 1, "start": 0}
+    try:
+        r = requests.get(url, params=params, auth=auth, timeout=30)
+        r.raise_for_status()
+        return bool(r.json().get("results"))
+    except Exception:
+        # Treat any error as “no pages” to avoid breaking UX
+        return False
+
+
+def fetch_pages(base_url: str, space_key: str, auth) -> list[tuple]:
     """
     Return list of tuples:
         (page_id, title, body_text, page_url)
@@ -92,8 +124,7 @@ def fetch_pages(base_url: str, space_key: str, auth) -> list:
         }
         r = requests.get(url, params=params, auth=auth, timeout=30)
         r.raise_for_status()
-        data = r.json()
-        items = data.get("results", [])
+        items = r.json().get("results", [])
         if not items:
             break
         for p in items:
@@ -330,8 +361,18 @@ class ConfluenceSearch(QWidget):
             QMessageBox.critical(self, "Error", f"Could not list spaces:\n{e}")
             self._log(f"ERROR: {e}")
             return
-        self._fill_space_combo(spaces)
-        self._write_spaces_cache(spaces)
+
+        # Filter out empty spaces
+        filtered_spaces = []
+        self._log("Checking spaces for content …")
+        for s in spaces:
+            if space_has_pages(self.base_url.text(), s["key"], auth):
+                filtered_spaces.append(s)
+            else:
+                self._log(f"Skipping empty space: {s['name']} ({s['key']})")
+
+        self._fill_space_combo(filtered_spaces)
+        self._write_spaces_cache(filtered_spaces)
         QMessageBox.information(self, "Spaces", f"{self.space_box.count()} spaces loaded.")
 
     # ────────── index‑loading helpers ──────────
