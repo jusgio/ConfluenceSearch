@@ -274,12 +274,14 @@ class ConfluenceSearch(QWidget):
             self._log(f"Cache write error: {e}")
 
     def _fill_space_combo(self, spaces):
+        """Populate the combo box with the *names* of the spaces only."""
         include_pers = self.include_personal.isChecked()
         self.space_box.clear()
         for s in spaces:
             if not include_pers and s["key"].startswith("~"):
                 continue
-            self.space_box.addItem(f"{s['key']} — {s['name']}", userData=s["key"])
+            # Display the human‑readable name, but keep the key as userData.
+            self.space_box.addItem(s["name"], userData=s["key"])
         if self.space_box.count() == 0:
             self.space_box.addItem("— no spaces —")
 
@@ -342,7 +344,8 @@ class ConfluenceSearch(QWidget):
         self._clear_log()
         self.prog.setValue(0)
         auth = HTTPBasicAuth(self.username.text(), self.api_token.text())
-        space_key = self.space_box.currentData() or self.space_box.currentText().split(" — ")[0]
+        # The key is stored in userData, so prefer currentData().
+        space_key = self.space_box.currentData() or self.space_box.currentText()
         self._log(f"Fetching pages from space {space_key} …")
 
         try:
