@@ -14,6 +14,7 @@ Everything else remains the same.
 """
 
 import json
+import math
 import os
 import sys
 import pickle
@@ -252,6 +253,9 @@ class ConfluenceSearch(QWidget):
         self.titles_only = QCheckBox("List titles only (skip embed/index)")
         self.titles_only.setChecked(False)
 
+        self.auto_nlist_nprobes = QCheckBox("Automatically choose the optimal values for nlist and nprobes")
+        self.auto_nlist_nprobes.stateChanged.connect(self.toggle_nlist_nprobes)
+
         self.nlist = QSpinBox()
         self.nlist.setRange(1, 4096)
         self.nlist.setValue(1)
@@ -272,6 +276,7 @@ class ConfluenceSearch(QWidget):
         form.addRow(self.include_personal)
         form.addRow("Embedding model:", self.model_box)
         form.addRow(self.titles_only)
+        form.addRow(self.auto_nlist_nprobes)
         form.addRow("FAISS nlist:", self.nlist)
         form.addRow("FAISS nprobe:", self.nprobe)
         form.addRow(btn_build)
@@ -413,6 +418,11 @@ class ConfluenceSearch(QWidget):
             item = self.space_list.item(i)
             item.setSelected(False)
 
+    def toggle_nlist_nprobes(self, state):
+        disabled = state == 2  # Qt.Checked == 2
+        self.nlist.setDisabled(disabled)
+        self.nprobe.setDisabled(disabled)
+
     # ────────── index‑loading helpers ──────────
     def _refresh_available_indexes(self):
         self.available_list.clear()
@@ -481,6 +491,7 @@ class ConfluenceSearch(QWidget):
         return vecs
 
     def _build_faiss_ivf(self, dim: int, vecs: np.ndarray) -> faiss.IndexIVFFlat:
+        self._log(f"building faiss index with nlist={self.nlist.value()} and nprobe={self.nprobe.value()}")
         quantizer = faiss.IndexHNSWFlat(dim, 32)
         index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
         index.train(vecs)
@@ -517,6 +528,12 @@ class ConfluenceSearch(QWidget):
             return
 
         self._log(f"TOTAL pages fetched: {len(pages)}.")
+
+        # automatically get best nlist and nprobe values for the amount of pages
+        if self.auto_nlist_nprobes.isChecked():
+            tmp_nlist, tmp_nprobe = self._return_optimal_faiss_nlist_nprobe(len(pages))
+            self.nlist.setValue(tmp_nlist)
+            self.nprobe.setValue(tmp_nprobe)
 
         # titles‑only diagnostic
         if self.titles_only.isChecked():
@@ -573,6 +590,16 @@ class ConfluenceSearch(QWidget):
             f"Indexed {len(pages)} pages across {len(space_keys)} spaces " f"→ 2 files written (titles & text).",
         )
         self._refresh_available_indexes()
+
+    @staticmethod
+    def _return_optimal_faiss_nlist_nprobe(num_elements):
+        nlist, nprobe = 1, 1
+        if not num_elements < 1000:
+            # Base suggestion: nlist ≈ sqrt(N)
+            nlist = int(round(math.sqrt(num_elements)))
+            # Determine nprobe
+            nprobe = round(nlist / 10)
+        return nlist, nprobe
 
     # ─────────────────────── search ────────────────────────────────
     def do_search(self):
