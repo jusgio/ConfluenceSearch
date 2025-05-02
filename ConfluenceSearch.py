@@ -62,14 +62,10 @@ def fetch_spaces(base_url: str, auth) -> list:
     out, start, limit = [], 0, 50
     url = f"{base_url.rstrip('/')}/rest/api/space"
     while True:
-        r = requests.get(
-            url, params={"limit": limit, "start": start}, auth=auth, timeout=30
-        )
+        r = requests.get(url, params={"limit": limit, "start": start}, auth=auth, timeout=30)
         r.raise_for_status()
         data = r.json()
-        out.extend(
-            {"key": s["key"], "name": s["name"]} for s in data.get("results", [])
-        )
+        out.extend({"key": s["key"], "name": s["name"]} for s in data.get("results", []))
         if not data.get("_links", {}).get("next"):
             break
         start += limit
@@ -298,9 +294,7 @@ class ConfluenceSearch(QWidget):
             return
         self._fill_space_combo(spaces)
         self._write_spaces_cache(spaces)
-        QMessageBox.information(
-            self, "Spaces", f"{self.space_box.count()} spaces loaded."
-        )
+        QMessageBox.information(self, "Spaces", f"{self.space_box.count()} spaces loaded.")
 
     # ────────── index-loading helpers ──────────
     def _refresh_available_indexes(self):
@@ -334,10 +328,7 @@ class ConfluenceSearch(QWidget):
         self._refresh_available_indexes()
 
     def load_all_available_indexes(self):
-        keys = [
-            self.available_list.item(i).text()
-            for i in range(self.available_list.count())
-        ]
+        keys = [self.available_list.item(i).text() for i in range(self.available_list.count())]
         if not keys:
             QMessageBox.information(self, "Load All", "No available indexes.")
             return
@@ -350,9 +341,7 @@ class ConfluenceSearch(QWidget):
         self._clear_log()
         self.prog.setValue(0)
         auth = HTTPBasicAuth(self.username.text(), self.api_token.text())
-        space_key = (
-            self.space_box.currentData() or self.space_box.currentText().split(" — ")[0]
-        )
+        space_key = self.space_box.currentData() or self.space_box.currentText().split(" — ")[0]
         self._log(f"Fetching pages from space {space_key} …")
 
         try:
@@ -372,10 +361,7 @@ class ConfluenceSearch(QWidget):
             return
 
         model = self._lazy_model()
-        texts = [
-            title if self.only_title.isChecked() else f"{title}\n{body}"
-            for _, title, body, _ in pages
-        ]
+        texts = [title if self.only_title.isChecked() else f"{title}\n{body}" for _, title, body, _ in pages]
         dim = model.get_sentence_embedding_dimension()
 
         vecs = []
@@ -389,9 +375,7 @@ class ConfluenceSearch(QWidget):
 
         self._log("Building FAISS index …")
         quantizer = faiss.IndexHNSWFlat(dim, 32)
-        index = faiss.IndexIVFFlat(
-            quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT
-        )
+        index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
         index.train(vecs)
         index.add(vecs)
         index.nprobe = self.nprobe.value()
@@ -422,9 +406,7 @@ class ConfluenceSearch(QWidget):
 
         self._log(f"Query: {query!r}")
 
-        vec = (
-            self._lazy_model().encode([query], convert_to_numpy=True).astype("float32")
-        )
+        vec = self._lazy_model().encode([query], convert_to_numpy=True).astype("float32")
         faiss.normalize_L2(vec)
 
         k = self.top_k.value()
@@ -444,10 +426,7 @@ class ConfluenceSearch(QWidget):
         self.results.clear()
         for rank, (sim, key, pid, title, url) in enumerate(all_hits, 1):
             if url:
-                self.results.append(
-                    f'{rank}. [{key}:{pid}] <a href="{url}">{title}</a> '
-                    f"(sim={sim:.3f})"
-                )
+                self.results.append(f'{rank}. [{key}:{pid}] <a href="{url}">{title}</a> ' f"(sim={sim:.3f})")
             else:
                 self.results.append(f"{rank}. [{key}:{pid}] {title} (sim={sim:.3f})")
 
