@@ -7,7 +7,7 @@ REM Activate virtual environment
 call .venv\Scripts\activate.bat
 
 REM Install required packages
-pip install sentence-transformers faiss-cpu pyqt5 requests beautifulsoup4
+pip install sentence-transformers faiss-cpu pyqt5 requests beautifulsoup4 black pre-commit
 
 echo.
 echo Setup complete. To activate the environment later, run:
