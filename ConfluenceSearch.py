@@ -214,12 +214,29 @@ class ConfluenceSearch(QWidget):
         # spaces selector ‑‑ multi‑select list
         self.space_list = QListWidget()
         self.space_list.setSelectionMode(QAbstractItemView.MultiSelection)
+
         btn_spaces = QPushButton("Load Spaces")
         btn_spaces.setFixedWidth(120)
         btn_spaces.clicked.connect(self.load_spaces)
+
+        btn_select_all = QPushButton("Select All")
+        btn_select_all.setFixedWidth(120)
+        btn_select_all.clicked.connect(self.select_all_spaces)
+
+        btn_deselect_all = QPushButton("Deselect All")
+        btn_deselect_all.setFixedWidth(120)
+        btn_deselect_all.clicked.connect(self.deselect_all_spaces)
+
+        # Vertical layout for buttons
+        v_buttons = QVBoxLayout()
+        v_buttons.addWidget(btn_spaces)
+        v_buttons.addWidget(btn_select_all)
+        v_buttons.addWidget(btn_deselect_all)
+
+        # Horizontal layout for list and buttons
         h_space = QHBoxLayout()
         h_space.addWidget(self.space_list, stretch=1)
-        h_space.addWidget(btn_spaces)
+        h_space.addLayout(v_buttons)
 
         self.include_personal = QCheckBox("Include personal spaces (~)")
 
@@ -385,6 +402,16 @@ class ConfluenceSearch(QWidget):
         self._fill_space_list(filtered_spaces)
         self._write_spaces_cache(filtered_spaces)
         QMessageBox.information(self, "Spaces", f"{self.space_list.count()} spaces loaded.")
+
+    def select_all_spaces(self):
+        for i in range(self.space_list.count()):
+            item = self.space_list.item(i)
+            item.setSelected(True)
+
+    def deselect_all_spaces(self):
+        for i in range(self.space_list.count()):
+            item = self.space_list.item(i)
+            item.setSelected(False)
 
     # ────────── index‑loading helpers ──────────
     def _refresh_available_indexes(self):
