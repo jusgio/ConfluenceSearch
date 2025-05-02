@@ -4,14 +4,13 @@ Confluence semantic‑search GUI (FAISS backend)
 
 Changes in this revision
 ─────────────────────────
-• The single‑selection *combo box* for choosing a space has been replaced with a
-  *multi‑selection list* (QListWidget).
-• “Fetch & Index” now gathers pages from **all** selected spaces and builds one
-  combined FAISS index containing every page of every selected space.
-• File‑name logic copes with multiple spaces by concatenating their keys with
-  “+”.  E.g. 3 spaces ABC, DEF, XYZ ⇒ index file
-  `confluence_ABC+DEF+XYZ__3spaces.index`.
-• All other behaviour is unchanged.
+• “Fetch & Index” now produces **two** indexes:
+    1. Titles‑only      → file suffix “__titles”
+    2. Body‑text‑only   → file suffix “__text”
+  Both share the same page‑mapping *.pkl* structure.
+• Available‑index list shows “[titles]” or “[text]” so you can load either.
+• Filenames remain backward‑compatible for previously created (single) indexes.
+Everything else remains the same.
 """
 
 import json
@@ -56,6 +55,8 @@ INDEXES_DIR = Path("indexes")
 IDX_PREFIX = "confluence_"
 MAP_PREFIX = "id_to_page_"
 SEPARATOR = "__"  # separates key and (sanitised) name in filenames
+SUFFIX_TITLES = "titles"  # extra suffix for title‑only   index files
+SUFFIX_TEXT = "text"  # extra suffix for body‑text    index files
 
 
 # ───────────────────────────── helpers ────────────────────────────────
@@ -147,7 +148,7 @@ def _index_rest(key: str, name: str) -> str:
 def _parse_index_filename(path: Path) -> tuple[str, str]:
     """
     Extract (key, display_name) from an index or map filename.
-    Falls back gracefully if pattern is unknown / legacy.
+    Handles optional “__titles” / “__text” suffixes for the new dual‑index mode.
     """
     stem = path.stem
     if stem.startswith(IDX_PREFIX):
@@ -156,12 +157,27 @@ def _parse_index_filename(path: Path) -> tuple[str, str]:
         rest = stem[len(MAP_PREFIX) :]
     else:
         rest = stem
-    if SEPARATOR in rest:
-        key, safe_name = rest.split(SEPARATOR, 1)
+
+    suffix = ""
+    if rest.endswith(f"{SEPARATOR}{SUFFIX_TITLES}"):
+        suffix = SUFFIX_TITLES
+        rest_main = rest[: -len(f"{SEPARATOR}{SUFFIX_TITLES}")]
+    elif rest.endswith(f"{SEPARATOR}{SUFFIX_TEXT}"):
+        suffix = SUFFIX_TEXT
+        rest_main = rest[: -len(f"{SEPARATOR}{SUFFIX_TEXT}")]
+    else:
+        rest_main = rest
+
+    if SEPARATOR in rest_main:
+        key, safe_name = rest_main.split(SEPARATOR, 1)
         disp_name = safe_name.replace("_", " ").strip()
     else:  # legacy filename containing only the key
-        key = rest
+        key = rest_main
         disp_name = key
+
+    if suffix:
+        key = f"{key}{SEPARATOR}{suffix}"  # ensures uniqueness in loaded list
+        disp_name += f" [{suffix}]"
     return key, disp_name
 
 
@@ -174,7 +190,7 @@ class ConfluenceSearch(QWidget):
 
         # runtime
         self.model = None
-        # each element: {"key": <space_key>, "name": <space_name>,
+        # each element: {"key": <unique_key>, "name": <display_name>,
         #                "index": faiss_index, "map": id_to_page}
         self.loaded_indices: list[dict] = []
 
@@ -195,7 +211,7 @@ class ConfluenceSearch(QWidget):
         self.api_token = QLineEdit(os.getenv("CONFLUENCE_TOKEN") or "")
         self.api_token.setEchoMode(QLineEdit.Password)
 
-        # spaces selector ‑‑ **now multi‑select list**
+        # spaces selector ‑‑ multi‑select list
         self.space_list = QListWidget()
         self.space_list.setSelectionMode(QAbstractItemView.MultiSelection)
         btn_spaces = QPushButton("Load Spaces")
@@ -215,9 +231,6 @@ class ConfluenceSearch(QWidget):
                 "paraphrase-albert-small-v2",
             ]
         )
-
-        self.only_title = QCheckBox("Just title")
-        self.only_title.setChecked(False)
 
         self.titles_only = QCheckBox("List titles only (skip embed/index)")
         self.titles_only.setChecked(False)
@@ -241,7 +254,6 @@ class ConfluenceSearch(QWidget):
         form.addRow(QLabel("Spaces:"), h_space)
         form.addRow(self.include_personal)
         form.addRow("Embedding model:", self.model_box)
-        form.addRow(self.only_title)
         form.addRow(self.titles_only)
         form.addRow("FAISS nlist:", self.nlist)
         form.addRow("FAISS nprobe:", self.nprobe)
@@ -428,6 +440,27 @@ class ConfluenceSearch(QWidget):
         self._refresh_available_indexes()
 
     # ────────────────────── fetch & index ────────────────────────────
+    def _encode_texts(self, texts: list[str]) -> np.ndarray:
+        """Helper: encode texts in chunks, normalise to L2."""
+        model = self._lazy_model()
+        vecs = []
+        for i in range(0, len(texts), 128):
+            self.prog.setValue(int(i / len(texts) * 100))
+            QApplication.processEvents()
+            vecs.extend(model.encode(texts[i : i + 128], convert_to_numpy=True))
+        self.prog.setValue(100)
+        vecs = np.asarray(vecs, dtype="float32")
+        faiss.normalize_L2(vecs)
+        return vecs
+
+    def _build_faiss_ivf(self, dim: int, vecs: np.ndarray) -> faiss.IndexIVFFlat:
+        quantizer = faiss.IndexHNSWFlat(dim, 32)
+        index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
+        index.train(vecs)
+        index.add(vecs)
+        index.nprobe = self.nprobe.value()
+        return index
+
     def fetch_and_index(self):
         self._clear_log()
         self.prog.setValue(0)
@@ -465,25 +498,22 @@ class ConfluenceSearch(QWidget):
             QMessageBox.information(self, "Done", "Titles listed in log pane.")
             return
 
-        model = self._lazy_model()
-        texts = [title if self.only_title.isChecked() else f"{title}\n{body}" for _, title, body, _ in pages]
-        dim = model.get_sentence_embedding_dimension()
+        # Prepare lists for dual indexing
+        titles_list = [title for _, title, _, _ in pages]
+        body_list = [body for _, _, body, _ in pages]
 
-        vecs = []
-        for i in range(0, len(texts), 128):
-            self.prog.setValue(int(i / len(texts) * 100))
-            QApplication.processEvents()
-            vecs.extend(model.encode(texts[i : i + 128], convert_to_numpy=True))
-        self.prog.setValue(100)
-        vecs = np.asarray(vecs, dtype="float32")
-        faiss.normalize_L2(vecs)
+        # Encode titles & build titles index
+        self._log("Encoding titles …")
+        titles_vecs = self._encode_texts(titles_list)
+        dim = titles_vecs.shape[1]
+        self._log("Building FAISS index (titles) …")
+        idx_titles = self._build_faiss_ivf(dim, titles_vecs)
 
-        self._log("Building FAISS index …")
-        quantizer = faiss.IndexHNSWFlat(dim, 32)
-        index = faiss.IndexIVFFlat(quantizer, dim, self.nlist.value(), faiss.METRIC_INNER_PRODUCT)
-        index.train(vecs)
-        index.add(vecs)
-        index.nprobe = self.nprobe.value()
+        # Encode body text & build text index
+        self._log("Encoding body text …")
+        text_vecs = self._encode_texts(body_list)
+        self._log("Building FAISS index (text) …")
+        idx_text = self._build_faiss_ivf(dim, text_vecs)
 
         # create combined filename parts
         combined_key = "+".join(space_keys)
@@ -491,17 +521,31 @@ class ConfluenceSearch(QWidget):
         rest = _index_rest(combined_key, combined_name)
 
         INDEXES_DIR.mkdir(exist_ok=True)
-        idx_path = INDEXES_DIR / f"{IDX_PREFIX}{rest}.index"
-        map_path = INDEXES_DIR / f"{MAP_PREFIX}{rest}.pkl"
 
-        faiss.write_index(index, str(idx_path))
+        # ───── store titles index ─────
+        idx_path_t = INDEXES_DIR / f"{IDX_PREFIX}{rest}{SEPARATOR}{SUFFIX_TITLES}.index"
+        map_path_t = INDEXES_DIR / f"{MAP_PREFIX}{rest}{SEPARATOR}{SUFFIX_TITLES}.pkl"
+        faiss.write_index(idx_titles, str(idx_path_t))
         pickle.dump(
             {i: (pid, title, url) for i, (pid, title, _, url) in enumerate(pages)},
-            open(map_path, "wb"),
+            open(map_path_t, "wb"),
         )
 
-        self._log(f"Index built and saved ({idx_path.name}).")
-        QMessageBox.information(self, "Done", f"Indexed {len(pages)} pages across {len(space_keys)} spaces.")
+        # ───── store text   index ─────
+        idx_path_x = INDEXES_DIR / f"{IDX_PREFIX}{rest}{SEPARATOR}{SUFFIX_TEXT}.index"
+        map_path_x = INDEXES_DIR / f"{MAP_PREFIX}{rest}{SEPARATOR}{SUFFIX_TEXT}.pkl"
+        faiss.write_index(idx_text, str(idx_path_x))
+        pickle.dump(
+            {i: (pid, title, url) for i, (pid, title, _, url) in enumerate(pages)},
+            open(map_path_x, "wb"),
+        )
+
+        self._log(f"Indexes built and saved:\n  • {idx_path_t.name}\n  • {idx_path_x.name}")
+        QMessageBox.information(
+            self,
+            "Done",
+            f"Indexed {len(pages)} pages across {len(space_keys)} spaces " f"→ 2 files written (titles & text).",
+        )
         self._refresh_available_indexes()
 
     # ─────────────────────── search ────────────────────────────────
