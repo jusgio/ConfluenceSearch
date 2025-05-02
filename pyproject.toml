@@ -1,5 +1,4 @@
 [tool.black]
 line-length = 120       # default is 88
 target-version = ["py312"]
-extend-exclude = ["migrations/"]
 skip-string-normalization = true
