@@ -140,9 +140,9 @@ def _safe(s: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in s)
 
 
-def _index_rest(key: str, name: str) -> str:
+def _index_rest(name: str) -> str:
     """The part of the filename after the prefix (sans extension)."""
-    return f"{key}{SEPARATOR}{_safe(name)}"
+    return f"{_safe(name)}"
 
 
 def _parse_index_filename(path: Path) -> tuple[str, str]:
@@ -516,9 +516,8 @@ class ConfluenceSearch(QWidget):
         idx_text = self._build_faiss_ivf(dim, text_vecs)
 
         # create combined filename parts
-        combined_key = "+".join(space_keys)
         combined_name = f"{len(space_keys)}spaces"
-        rest = _index_rest(combined_key, combined_name)
+        rest = _index_rest(combined_name)
 
         INDEXES_DIR.mkdir(exist_ok=True)
 
